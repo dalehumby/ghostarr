@@ -15,6 +15,10 @@ The required Python version is pinned in `.python-version` (currently 3.14). `uv
 
 The only runtime dependency is `requests` (declared in `pyproject.toml`). There are no dev or test dependencies at this time.
 
+## Code style
+
+Always run `ruff check ghostarr.py` and `ruff format ghostarr.py` after making changes.
+
 ## Series evaluation algorithm
 
 All logic lives in `process_series()` in `ghostarr.py`.

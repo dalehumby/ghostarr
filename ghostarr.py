@@ -472,7 +472,9 @@ def confirm_and_apply_actions(
         for a in series_level_actions:
             if a["type"] == "delete_series":
                 answer = (
-                    input(f'  Delete entire series "{title}" from Sonarr? (y/n/k=keep series): ')
+                    input(
+                        f'  Delete entire series "{title}" from Sonarr? (y/n/k=keep series): '
+                    )
                     .strip()
                     .lower()
                 )
