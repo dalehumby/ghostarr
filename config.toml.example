@@ -1,0 +1,17 @@
+[sonarr]
+url = "http://localhost:8989"
+api_key = "your-sonarr-api-key-here"
+
+[jellyfin]
+url = "http://localhost:8096"
+api_key = "your-jellyfin-api-key-here"
+
+[options]
+# Number of months used as the "recently active" cutoff
+cutoff_months = 3
+
+# When true, print candidates but do not mutate any data
+dry_run = true
+
+# Series tagged with this label in Sonarr are never deleted
+keep_tag = "keep"
