@@ -1,6 +1,6 @@
-# ghostarr
+# 👻 ghostarr
 
-ghostarr cross-references your Sonarr library with watch history from the Jellyfin Playback Reporting plugin. Series and seasons that have not been watched within a configurable period are unmonitored and their files deleted, freeing up disk space.
+ghostarr cross-references your Sonarr library with watch history from the Jellyfin Playback Reporting plugin. Series and seasons that have not been watched within a configurable period are unmonitored in Sonarr and their files deleted from disk, freeing up space.
 
 <!-- TODO: Radarr/movies support is not yet implemented -->
 
@@ -11,7 +11,7 @@ ghostarr cross-references your Sonarr library with watch history from the Jellyf
 - Seasons not watched within the cutoff period are unmonitored in Sonarr and their files deleted
 - Ended series where all seasons have been cleaned up are removed from Sonarr entirely
 - In dry-run mode (default), only prints a report — nothing is deleted
-- In interactive mode, prompts season-by-season and series-by-series before acting; press `k` to permanently tag a series as keep and skip it
+- In interactive mode, prompts season-by-season and series-by-series before acting
 
 <!-- TODO: add screenshot or sample output here -->
 
@@ -24,34 +24,36 @@ ghostarr cross-references your Sonarr library with watch history from the Jellyf
 
 ## Setup
 
-1. Clone the repository:
-   ```
-   git clone https://github.com/dalehumby/ghostarr.git
-   cd ghostarr
-   ```
+### 1. Install the Jellyfin Playback Reporting plugin
 
-2. Install dependencies:
-   ```
-   uv sync
-   ```
+1. In Jellyfin, go to Dashboard > Plugins and search for the Playback Reporting plugin. Install and restart Jellyfin.
+2. Once restarted, go to Dashboard > Plugins > Playback Reporting.
+3. Click the Settings tab and set "Keep data for" to Forever.
 
-3. Copy the example config and fill in your values:
-   ```
-   cp config.toml.example config.toml
-   ```
+This plugin only records statistics from when it is installed — it cannot backfill prior playback history. It is best to leave it running for a few months before running ghostarr.
 
-4. Install Jellyfin Playback Reporting plugin
+### 2. Clone the repository
 
-- In Jellyfin, goto Dashboard > Plugins and search for the Playback Reporting plugin. Install and restart Jellyin.
-- Once restarted, in Dashboard in the Plugins section of the side bar, you'll see Playback Reporting.
-- Click the Settings tab, and set "Keep data for" to Forever.
+```
+git clone https://github.com/dalehumby/ghostarr.git
+cd ghostarr
+```
 
-This plugin only records statistics from when it is installed, it cannot backfill prior playback history. It's best to leave this running for a few months gathering playback statistics before running Ghostarr.
+### 3. Install dependencies
 
+```
+uv sync
+```
+
+### 4. Configure
+
+```
+cp config.toml.example config.toml
+```
+
+Then edit `config.toml` with your values (see Configuration below).
 
 ## Configuration
-
-Edit `config.toml`:
 
 ```toml
 [sonarr]
@@ -73,7 +75,7 @@ keep_tag = "keep"     # series with this Sonarr tag are never touched
 ## Running
 
 ```
-uv run ghostarr
+uv run ghostarr.py
 ```
 
 By default `dry_run = true` — the script prints a report but makes no changes. Review the output, then set `dry_run = false` in `config.toml` to run in interactive mode.
@@ -84,16 +86,15 @@ In interactive mode you are prompted for each candidate season and series:
 - `n` — skip, do not delete anything
 - `k` — add the keep tag to the series in Sonarr and skip it entirely
 
-
 ## (Optional) Set up a Leaving Soon library in Jellyfin
 
 Rather than deleting series outright, you can route them through Sonarr's Recycle Bin and expose that folder as a separate Jellyfin library. This gives your users a window to watch anything before it disappears, and acts as a safety net if you accidentally delete something you meant to keep.
 
-1. In Sonarr > Settings > Media Management
-2. Under File Management > Recycling Bin, select a folder for deleted shows to be sent to, e.g. `/media/tvshows-leaving-soon`.
+1. In Sonarr, go to Settings > Media Management.
+2. Under File Management > Recycling Bin, select a folder for deleted shows, e.g. `/media/tvshows-leaving-soon`.
 3. Set Recycling Bin Cleanup to 14 or 30 days.
-4. In Jellyfin > Dashboard > Libraries > Libraries > Add Media Library, selecting the Content Type as Show, and the same folder as above.
-5. Ensure your users have access to this library in the Users > <Username> > Access tab.
+4. In Jellyfin, go to Dashboard > Libraries > Add Media Library. Set the content type to Show and point it at the same folder.
+5. Ensure your users have access to the library under Users > username > Access.
 
 ## License
 
