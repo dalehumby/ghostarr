@@ -26,7 +26,7 @@ ghostarr cross-references your Sonarr library with watch history from the Jellyf
 
 1. Clone the repository:
    ```
-   git clone https://github.com/<!-- TODO: fill in your GitHub username -->/ghostarr.git
+   git clone https://github.com/dalehumby/ghostarr.git
    cd ghostarr
    ```
 
