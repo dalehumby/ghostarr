@@ -128,6 +128,20 @@ class SonarrClient:
     def delete_series(self, series_id: int):
         self._delete(f"/api/v3/series/{series_id}", deleteFiles="true")
 
+    def create_tag(self, label: str) -> dict:
+        r = self.session.post(f"{self.base}/api/v3/tag", json={"label": label})
+        r.raise_for_status()
+        return r.json()
+
+    def add_tag_to_series(self, series: dict, tag_id: int) -> dict:
+        """PUT the full series back with tag_id added (idempotent)."""
+        updated = dict(series)
+        existing = list(series.get("tags", []))
+        if tag_id not in existing:
+            existing.append(tag_id)
+        updated["tags"] = existing
+        return self._put(f"/api/v3/series/{series['id']}", updated)
+
 
 # ---------------------------------------------------------------------------
 # Jellyfin API helpers
@@ -335,18 +349,18 @@ def process_series(
             skips.append(_skip("season_not_evaluated", season_number=sn))
 
     # --- Possibly remove entire series from Sonarr ---
-    if all_clean:
-        if series.get("status") == "ended":
-            actions.append(
-                {
-                    "type": "delete_series",
-                    "series_id": series_id,
-                    "series_title": title,
-                    "reason": "all seasons cleaned up and series has ended",
-                }
-            )
-        else:
-            skips.append(_skip("series_continuing"))
+    if all_clean and series.get("status") == "ended":
+        actions.append(
+            {
+                "type": "delete_series",
+                "series_id": series_id,
+                "series_title": title,
+                "reason": "all seasons cleaned up and series has ended",
+            }
+        )
+    elif actions and series.get("status") != "ended":
+        # We cleaned up some seasons but the series is still airing — keep it in Sonarr
+        skips.append(_skip("series_continuing"))
 
     return actions, skips
 
@@ -374,6 +388,100 @@ def apply_actions(sonarr: SonarrClient, actions: list[dict], series_map: dict):
 
         elif atype == "delete_series":
             sonarr.delete_series(sid)
+
+
+def confirm_and_apply_actions(
+    sonarr: SonarrClient,
+    actions: list[dict],
+    series_map: dict,
+    keep_tag: str,
+    tags_map: dict[int, str],
+):
+    """Interactively confirm and execute mutations against Sonarr."""
+    from collections import defaultdict
+
+    # Build reverse lookup: label -> tag_id (populated lazily)
+    tag_id_by_label: dict[str, int] = {v: k for k, v in tags_map.items()}
+
+    def _get_or_create_keep_tag_id() -> int:
+        if keep_tag not in tag_id_by_label:
+            new_tag = sonarr.create_tag(keep_tag)
+            tag_id_by_label[keep_tag] = new_tag["id"]
+        return tag_id_by_label[keep_tag]
+
+    # Group actions by series_id, preserving encounter order
+    actions_by_series: dict[int, list[dict]] = {}
+    series_titles: dict[int, str] = {}
+    for a in actions:
+        sid = a["series_id"]
+        if sid not in actions_by_series:
+            actions_by_series[sid] = []
+            series_titles[sid] = a["series_title"]
+        actions_by_series[sid].append(a)
+
+    for sid, series_actions in actions_by_series.items():
+        title = series_titles[sid]
+        print(f"\n{BOLD}{CYAN}{title}{_R}")
+
+        # Split season-level vs series-level actions
+        season_actions: dict[int, list[dict]] = defaultdict(list)
+        series_level_actions: list[dict] = []
+        for a in series_actions:
+            if "season_number" in a:
+                season_actions[a["season_number"]].append(a)
+            else:
+                series_level_actions.append(a)
+
+        kept = False
+        for season_number in sorted(season_actions):
+            s_actions = season_actions[season_number]
+            delete_action = next(
+                (a for a in s_actions if a["type"] == "delete_season_files"), None
+            )
+            info = ""
+            if delete_action:
+                info = (
+                    f" ({delete_action.get('file_count', '?')} files,"
+                    f" {delete_action.get('size_gib', '?')} GiB)"
+                )
+            answer = (
+                input(f"  Delete Season {season_number}{info}? (y/n/k=keep series): ")
+                .strip()
+                .lower()
+            )
+            if answer == "k":
+                tag_id = _get_or_create_keep_tag_id()
+                series_map[sid] = sonarr.add_tag_to_series(series_map[sid], tag_id)
+                print(f'  {GREEN}[KEEP] Added "{keep_tag}" tag — skipping series.{_R}')
+                kept = True
+                break
+            elif answer == "y":
+                for a in s_actions:
+                    if a["type"] == "unmonitor_season":
+                        updated = sonarr.unmonitor_season(
+                            series_map[sid], season_number
+                        )
+                        series_map[sid] = updated
+                    elif a["type"] == "delete_season_files":
+                        ep_files = sonarr.get_episode_files(sid)
+                        sonarr.delete_season_files(ep_files, season_number)
+
+        if kept:
+            continue
+
+        for a in series_level_actions:
+            if a["type"] == "delete_series":
+                answer = (
+                    input(f'  Delete entire series "{title}" from Sonarr? (y/n/k=keep series): ')
+                    .strip()
+                    .lower()
+                )
+                if answer == "k":
+                    tag_id = _get_or_create_keep_tag_id()
+                    series_map[sid] = sonarr.add_tag_to_series(series_map[sid], tag_id)
+                    print(f'  {GREEN}[KEEP] Added "{keep_tag}" tag.{_R}')
+                elif answer == "y":
+                    sonarr.delete_series(sid)
 
 
 def print_report(all_actions: list[dict], all_skips: list[dict]):
@@ -489,7 +597,7 @@ def main():
 
     cfg = load_config(str(config_path))
     dry_run: bool = cfg.get("options", {}).get("dry_run", True)
-    cutoff_months: int = cfg.get("options", {}).get("cutoff_months", 3)
+    cutoff_months: int = cfg.get("options", {}).get("cutoff_months", 6)
     keep_tag: str = cfg.get("options", {}).get("keep_tag", "keep")
 
     sonarr = SonarrClient(
@@ -536,8 +644,8 @@ def main():
             f"\n{YELLOW}[DRY RUN] No changes made. Set dry_run = false in config.toml to apply.{_R}"
         )
     else:
-        print(f"\nApplying {len(all_actions)} action(s)…")
-        apply_actions(sonarr, all_actions, series_map)
+        print(f"\n{BOLD}Review and confirm deletions:{_R}")
+        confirm_and_apply_actions(sonarr, all_actions, series_map, keep_tag, tags_map)
         print(f"{GREEN}Done.{_R}")
 
 
