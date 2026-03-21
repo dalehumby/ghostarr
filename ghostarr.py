@@ -6,6 +6,9 @@ based on Jellyfin watch history.
 Run with DRY_RUN=true (default) to only print candidates without mutating data.
 """
 
+import itertools
+import threading
+import time
 import tomllib
 import sys
 from datetime import datetime, timezone, timedelta
@@ -26,6 +29,39 @@ RED = "\033[31m"
 GREEN = "\033[32m"
 YELLOW = "\033[33m"
 CYAN = "\033[36m"
+
+
+# ---------------------------------------------------------------------------
+# Spinner
+# ---------------------------------------------------------------------------
+
+
+class Spinner:
+    """Context manager that shows an animated spinner on a background thread."""
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, message: str):
+        self.message = message
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+
+    def _spin(self):
+        for frame in itertools.cycle(self._FRAMES):
+            if self._stop.is_set():
+                break
+            print(f"\r{CYAN}{frame}{_R} {self.message}", end="", flush=True)
+            time.sleep(0.1)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self._stop.set()
+        self._thread.join()
+        # Clear the spinner line
+        print(f"\r{' ' * (len(self.message) + 4)}\r", end="", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +312,7 @@ def process_series(
                     "series_title": title,
                     "season_number": season_number,
                     "file_count": file_count,
-                    "size_gib": round(season_bytes / (1024 ** 3), 1),
+                    "size_gib": round(season_bytes / (1024**3), 1),
                     "reason": "season marked for deletion",
                 }
             )
@@ -415,12 +451,27 @@ def print_report(all_actions: list[dict], all_skips: list[dict]):
                             f" {item['last_watched']} — kept{_R}"
                         )
                     elif stype == "season_not_evaluated":
-                        print(f"{prefix} {DIM}[NOT EVALUATED] (loop stopped at earlier season){_R}")
+                        print(
+                            f"{prefix} {DIM}[NOT EVALUATED] (loop stopped at earlier season){_R}"
+                        )
 
         # Series-level delete action (no season_number)
         for a in actions_by_series[sid]:
             if a["type"] == "delete_series":
                 print(f"  {RED}{BOLD}[DELETE SERIES] — {a['reason']}{_R}")
+
+    # --- Summary ---
+    season_deletes = [a for a in all_actions if a["type"] == "delete_season_files"]
+    series_deletes = [a for a in all_actions if a["type"] == "delete_series"]
+    total_files = sum(a.get("file_count", 0) for a in season_deletes)
+    total_gib = round(sum(a.get("size_gib", 0.0) for a in season_deletes), 1)
+
+    print(f"\n{DIM}{'─' * 50}{_R}")
+    print(f"{BOLD}Summary{_R}")
+    print(f"  Seasons to clean:  {len(season_deletes)}")
+    print(f"  Series to remove:  {len(series_deletes)}")
+    print(f"  Files to delete:   {total_files}")
+    print(f"  {BOLD}Space to free:     {total_gib} GiB{_R}")
 
 
 # ---------------------------------------------------------------------------
@@ -450,17 +501,21 @@ def main():
         api_key=cfg["jellyfin"]["api_key"],
     )
 
-    print("Fetching data from Sonarr…")
-    all_series = sonarr.get_all_series()[-50:]  # TODO: remove limit before production
-    tags = sonarr.get_tags()
+    with Spinner("Fetching series list from Sonarr…"):
+        all_series = sonarr.get_all_series()
+        tags = sonarr.get_tags()
     tags_map: dict[int, str] = {t["id"]: t["label"] for t in tags}
+    print(f"Found {len(all_series)} series.")
 
     # Build a series-id → series-object map for mutation phase
     series_map: dict[int, dict] = {s["id"]: s for s in all_series}
 
     all_actions: list[dict] = []
     all_skips: list[dict] = []
-    for series in all_series:
+    total = len(all_series)
+    for i, series in enumerate(all_series, 1):
+        title_trunc = series["title"][:45]
+        print(f"\r  [{i}/{total}] {title_trunc:<45}", end="", flush=True)
         episode_files = sonarr.get_episode_files(series["id"])
         actions, skips = process_series(
             series=series,
@@ -472,6 +527,7 @@ def main():
         )
         all_actions.extend(actions)
         all_skips.extend(skips)
+    print()  # end the progress line
 
     print_report(all_actions, all_skips)
 
