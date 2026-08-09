@@ -7,16 +7,14 @@ Run with DRY_RUN=true (default) to only print candidates without mutating data.
 """
 
 import itertools
+import sys
 import threading
 import time
 import tomllib
-import sys
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import requests
-
 
 # ---------------------------------------------------------------------------
 # Terminal colours
@@ -153,59 +151,61 @@ class JellyfinClient:
         self.base = url.rstrip("/")
         self.api_key = api_key
         self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "accept": "application/json",
-                "content-type": "application/json",
-            }
-        )
+        self.session.headers.update({"accept": "application/json"})
+        self.session.params = {"api_key": api_key}
+        self._series_map: dict[str, str] = {}
+        # (jellyfin_series_id, season_number) -> latest LastPlayedDate across all users
+        self._watch_cache: dict[tuple[str, int], datetime] = {}
 
-    def _post_query(self, sql: str) -> dict:
-        r = self.session.post(
-            f"{self.base}/user_usage_stats/submit_custom_query",
-            params={"api_key": self.api_key},
-            json={"CustomQueryString": sql, "ReplaceUserId": True},
-        )
+    def _get(self, path: str, **params) -> dict | list:
+        r = self.session.get(f"{self.base}{path}", params=params)
         r.raise_for_status()
         return r.json()
 
-    def get_last_watched(
-        self, series_name: str, season_number: int
-    ) -> Optional[datetime]:
-        """Query Jellyfin Playback Reporting plugin for the last watched datetime
-        of any episode in the given series/season."""
-        escaped = series_name.replace("'", "''")
-        sql = f"""SELECT
-    SUBSTR(ItemName, 1, INSTR(ItemName, ' - ') - 1) AS ShowName,
-    CAST(SUBSTR(ItemName, INSTR(ItemName, ' - s') + 4, 2) AS integer) AS Season,
-    MIN(DateCreated) AS FirstWatched,
-    MAX(DateCreated) AS LatestWatched,
-    COUNT(*) AS NumberOfWatches,
-    ROUND(SUM(PlayDuration) / 3600.0, 2) AS TotalHours
-FROM PlaybackActivity
-WHERE ItemType = 'Episode'
-  AND ItemName LIKE '% - s%e% - %'
-  AND ShowName = '{escaped}'
-  AND Season = {season_number}
-GROUP BY ShowName, Season
-ORDER BY TotalHours"""
-        try:
-            data = self._post_query(sql)
-        except requests.RequestException as e:
-            print(
-                f"  [WARN] Jellyfin query failed for {series_name} S{season_number}: {e}",
-                file=sys.stderr,
-            )
-            return None
-        results = data.get("results") or []
-        if not results:
-            return None
-        raw = results[0][3]  # LatestWatched — column order is fixed by our SQL
-        # Jellyfin returns 7 fractional-second digits; Python fromisoformat supports max 6
+    @staticmethod
+    def _parse_jellyfin_dt(raw: str) -> datetime:
         if "." in raw:
             date_part, frac = raw.rsplit(".", 1)
             raw = f"{date_part}.{frac[:6]}"
-        return datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(raw).replace(tzinfo=UTC)
+
+    def load_lookups(self):
+        """Fetch all series, users, and watch history upfront."""
+        data = self._get(
+            "/Items", IncludeItemTypes="Series", Recursive="true", Limit=10000
+        )
+        self._series_map = {item["Name"]: item["Id"] for item in data["Items"]}
+
+        users = self._get("/Users")
+        for user in users:
+            try:
+                played = self._get(
+                    f"/Users/{user['Id']}/Items",
+                    IncludeItemTypes="Episode",
+                    Recursive="true",
+                    Fields="UserData",
+                    Filters="IsPlayed",
+                    Limit=10000,
+                )
+            except requests.RequestException:
+                continue
+            for item in played.get("Items", []):
+                raw = item.get("UserData", {}).get("LastPlayedDate")
+                if not raw:
+                    continue
+                series_id = item.get("SeriesId", "")
+                season_num = item.get("ParentIndexNumber", -1)
+                key = (series_id, season_num)
+                dt = self._parse_jellyfin_dt(raw)
+                prev = self._watch_cache.get(key)
+                if prev is None or dt > prev:
+                    self._watch_cache[key] = dt
+
+    def get_last_watched(self, series_name: str, season_number: int) -> datetime | None:
+        jellyfin_id = self._series_map.get(series_name)
+        if jellyfin_id is None:
+            return None
+        return self._watch_cache.get((jellyfin_id, season_number))
 
 
 # ---------------------------------------------------------------------------
@@ -213,14 +213,13 @@ ORDER BY TotalHours"""
 # ---------------------------------------------------------------------------
 
 
-def _parse_dt(iso: Optional[str]) -> Optional[datetime]:
+def _parse_dt(iso: str | None) -> datetime | None:
     """Parse an ISO 8601 datetime string into a timezone-aware datetime."""
     if not iso:
         return None
-    # Python 3.11+ fromisoformat handles 'Z' suffix
-    dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    dt = datetime.fromisoformat(iso)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -241,7 +240,7 @@ def process_series(
     """
     actions: list[dict] = []
     skips: list[dict] = []
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     cutoff = now - timedelta(days=cutoff_months * 30)
 
     title = series["title"]
@@ -611,9 +610,10 @@ def main():
         api_key=cfg["jellyfin"]["api_key"],
     )
 
-    with Spinner("Fetching series list from Sonarr…"):
+    with Spinner("Fetching series list from Sonarr and Jellyfin…"):
         all_series = sonarr.get_all_series()
         tags = sonarr.get_tags()
+        jellyfin.load_lookups()
     tags_map: dict[int, str] = {t["id"]: t["label"] for t in tags}
     print(f"Found {len(all_series)} series.")
 
