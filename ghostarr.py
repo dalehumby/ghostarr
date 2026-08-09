@@ -391,15 +391,20 @@ def apply_actions(sonarr: SonarrClient, actions: list[dict], series_map: dict):
 
 def confirm_and_apply_actions(
     sonarr: SonarrClient,
-    actions: list[dict],
+    all_actions: list[dict],
+    all_skips: list[dict],
     series_map: dict,
     keep_tag: str,
     tags_map: dict[int, str],
 ):
-    """Interactively confirm and execute mutations against Sonarr."""
+    """Interactively confirm and execute mutations against Sonarr.
+
+    Shows the summary totals first, then per-series detail with inline prompts.
+    """
     from collections import defaultdict
 
-    # Build reverse lookup: label -> tag_id (populated lazily)
+    _print_summary(all_actions)
+
     tag_id_by_label: dict[str, int] = {v: k for k, v in tags_map.items()}
 
     def _get_or_create_keep_tag_id() -> int:
@@ -408,21 +413,15 @@ def confirm_and_apply_actions(
             tag_id_by_label[keep_tag] = new_tag["id"]
         return tag_id_by_label[keep_tag]
 
-    # Group actions by series_id, preserving encounter order
-    actions_by_series: dict[int, list[dict]] = {}
-    series_titles: dict[int, str] = {}
-    for a in actions:
-        sid = a["series_id"]
-        if sid not in actions_by_series:
-            actions_by_series[sid] = []
-            series_titles[sid] = a["series_title"]
-        actions_by_series[sid].append(a)
+    _, actions_by_series = _group_by_series(all_actions)
+    _, skips_by_series = _group_by_series(all_skips)
 
-    for sid, series_actions in actions_by_series.items():
-        title = series_titles[sid]
-        print(f"\n{BOLD}{CYAN}{title}{_R}")
+    for sid in actions_by_series:
+        series_actions = actions_by_series[sid]
+        title = series_actions[0]["series_title"]
 
-        # Split season-level vs series-level actions
+        _print_series_detail(sid, title, series_actions, skips_by_series[sid])
+
         season_actions: dict[int, list[dict]] = defaultdict(list)
         series_level_actions: list[dict] = []
         for a in series_actions:
@@ -485,91 +484,76 @@ def confirm_and_apply_actions(
                     sonarr.delete_series(sid)
 
 
-def print_report(all_actions: list[dict], all_skips: list[dict]):
-    # Build an ordered list of unique (series_id, series_title) keys preserving encounter order
-    seen: dict[int, str] = {}
-    for item in all_actions + all_skips:
-        sid = item["series_id"]
-        if sid not in seen:
-            seen[sid] = item["series_title"]
-
-    if not seen:
-        print(f"{GREEN}No candidates found.{_R}")
-        return
-
-    # Group actions and skips by series_id for easy lookup
+def _print_series_detail(
+    sid: int,
+    title: str,
+    series_actions: list[dict],
+    series_skips: list[dict],
+):
+    """Print the season-by-season detail block for a single series."""
     from collections import defaultdict
 
-    actions_by_series: dict[int, list[dict]] = defaultdict(list)
-    skips_by_series: dict[int, list[dict]] = defaultdict(list)
-    for a in all_actions:
-        actions_by_series[a["series_id"]].append(a)
-    for s in all_skips:
-        skips_by_series[s["series_id"]].append(s)
+    print(f"\n{BOLD}{CYAN}{title} (id={sid}){_R}")
 
-    for sid, title in seen.items():
-        print(f"\n{BOLD}{CYAN}{title} (id={sid}){_R}")
+    for skip in series_skips:
+        stype = skip["type"]
+        if stype == "series_added_recently":
+            print(f"  {YELLOW}[SKIP] Added recently ({skip['added']}){_R}")
+        elif stype == "series_keep_tag":
+            print(f'  {YELLOW}[SKIP] Has tag "{skip["tag"]}"{_R}')
+        elif stype == "series_continuing":
+            print(f"  {GREEN}[CONTINUING] Series not ended — keeping in Sonarr{_R}")
 
-        # Series-level skips first
-        for skip in skips_by_series[sid]:
-            stype = skip["type"]
-            if stype == "series_added_recently":
-                print(f"  {YELLOW}[SKIP] Added recently ({skip['added']}){_R}")
-            elif stype == "series_keep_tag":
-                print(f'  {YELLOW}[SKIP] Has tag "{skip["tag"]}"{_R}')
-            elif stype == "series_continuing":
-                print(f"  {GREEN}[CONTINUING] Series not ended — keeping in Sonarr{_R}")
+    season_items: dict[int, list[dict]] = defaultdict(list)
+    for a in series_actions:
+        if "season_number" in a:
+            season_items[a["season_number"]].append(("action", a))
+    for s in series_skips:
+        if "season_number" in s:
+            season_items[s["season_number"]].append(("skip", s))
 
-        # Season-level items, grouped by season number
-        season_items: dict[int, list[dict]] = defaultdict(list)
-        for a in actions_by_series[sid]:
-            if "season_number" in a:
-                season_items[a["season_number"]].append(("action", a))
-        for s in skips_by_series[sid]:
-            if "season_number" in s:
-                season_items[s["season_number"]].append(("skip", s))
+    for season_number in sorted(season_items):
+        label = f"  Season {season_number}:"
+        pad = " " * len(label)
+        first = True
+        for kind, item in season_items[season_number]:
+            prefix = label if first else pad
+            first = False
+            if kind == "action":
+                atype = item["type"]
+                if atype == "unmonitor_season":
+                    print(f"{prefix} {RED}[UNMONITOR] — {item['reason']}{_R}")
+                elif atype == "delete_season_files":
+                    print(
+                        f"{prefix} {RED}[DELETE FILES] ({item.get('file_count', '?')} files,"
+                        f" {item.get('size_gib', '?')} GiB) — {item['reason']}{_R}"
+                    )
+            else:
+                stype = item["type"]
+                if stype == "season_no_files":
+                    print(f"{prefix} {DIM}[NO FILES]{_R}")
+                elif stype == "season_aired_recently":
+                    print(
+                        f"{prefix} {YELLOW}[SKIP] Aired recently"
+                        f" ({item['previous_airing']}){_R}"
+                    )
+                elif stype == "season_recently_watched":
+                    print(
+                        f"{prefix} {GREEN}[WATCHED] Last watched"
+                        f" {item['last_watched']} — kept{_R}"
+                    )
+                elif stype == "season_not_evaluated":
+                    print(
+                        f"{prefix} {DIM}[NOT EVALUATED] (loop stopped at earlier season){_R}"
+                    )
 
-        for season_number in sorted(season_items):
-            label = f"  Season {season_number}:"
-            pad = " " * len(label)
-            first = True
-            for kind, item in season_items[season_number]:
-                prefix = label if first else pad
-                first = False
-                if kind == "action":
-                    atype = item["type"]
-                    if atype == "unmonitor_season":
-                        print(f"{prefix} {RED}[UNMONITOR] — {item['reason']}{_R}")
-                    elif atype == "delete_season_files":
-                        print(
-                            f"{prefix} {RED}[DELETE FILES] ({item.get('file_count', '?')} files,"
-                            f" {item.get('size_gib', '?')} GiB) — {item['reason']}{_R}"
-                        )
-                else:
-                    stype = item["type"]
-                    if stype == "season_no_files":
-                        print(f"{prefix} {DIM}[NO FILES]{_R}")
-                    elif stype == "season_aired_recently":
-                        print(
-                            f"{prefix} {YELLOW}[SKIP] Aired recently"
-                            f" ({item['previous_airing']}){_R}"
-                        )
-                    elif stype == "season_recently_watched":
-                        print(
-                            f"{prefix} {GREEN}[WATCHED] Last watched"
-                            f" {item['last_watched']} — kept{_R}"
-                        )
-                    elif stype == "season_not_evaluated":
-                        print(
-                            f"{prefix} {DIM}[NOT EVALUATED] (loop stopped at earlier season){_R}"
-                        )
+    for a in series_actions:
+        if a["type"] == "delete_series":
+            print(f"  {RED}{BOLD}[DELETE SERIES] — {a['reason']}{_R}")
 
-        # Series-level delete action (no season_number)
-        for a in actions_by_series[sid]:
-            if a["type"] == "delete_series":
-                print(f"  {RED}{BOLD}[DELETE SERIES] — {a['reason']}{_R}")
 
-    # --- Summary ---
+def _print_summary(all_actions: list[dict]):
+    """Print the totals summary line."""
     season_deletes = [a for a in all_actions if a["type"] == "delete_season_files"]
     series_deletes = [a for a in all_actions if a["type"] == "delete_series"]
     total_files = sum(a.get("file_count", 0) for a in season_deletes)
@@ -581,6 +565,40 @@ def print_report(all_actions: list[dict], all_skips: list[dict]):
     print(f"  Series to remove:  {len(series_deletes)}")
     print(f"  Files to delete:   {total_files}")
     print(f"  {BOLD}Space to free:     {total_gib} GiB{_R}")
+
+
+def _group_by_series(items: list[dict]) -> tuple[dict[int, str], dict[int, list[dict]]]:
+    """Group items by series_id, returning (ordered id->title map, id->items map)."""
+    from collections import defaultdict
+
+    seen: dict[int, str] = {}
+    grouped: dict[int, list[dict]] = defaultdict(list)
+    for item in items:
+        sid = item["series_id"]
+        if sid not in seen:
+            seen[sid] = item["series_title"]
+        grouped[sid].append(item)
+    return seen, grouped
+
+
+def print_report(all_actions: list[dict], all_skips: list[dict]):
+    seen: dict[int, str] = {}
+    for item in all_actions + all_skips:
+        sid = item["series_id"]
+        if sid not in seen:
+            seen[sid] = item["series_title"]
+
+    if not seen:
+        print(f"{GREEN}No candidates found.{_R}")
+        return
+
+    _, actions_by_series = _group_by_series(all_actions)
+    _, skips_by_series = _group_by_series(all_skips)
+
+    for sid, title in seen.items():
+        _print_series_detail(sid, title, actions_by_series[sid], skips_by_series[sid])
+
+    _print_summary(all_actions)
 
 
 # ---------------------------------------------------------------------------
@@ -639,16 +657,16 @@ def main():
         all_skips.extend(skips)
     print()  # end the progress line
 
-    print_report(all_actions, all_skips)
-
     if dry_run:
+        print_report(all_actions, all_skips)
         print(
             f"\n{YELLOW}[DRY RUN] No changes made. Set dry_run = false in config.toml to apply.{_R}"
         )
     else:
-        print(f"\n{BOLD}Review and confirm deletions:{_R}")
-        confirm_and_apply_actions(sonarr, all_actions, series_map, keep_tag, tags_map)
-        print(f"{GREEN}Done.{_R}")
+        confirm_and_apply_actions(
+            sonarr, all_actions, all_skips, series_map, keep_tag, tags_map
+        )
+        print(f"\n{GREEN}Done.{_R}")
 
 
 if __name__ == "__main__":
