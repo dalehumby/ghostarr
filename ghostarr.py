@@ -413,10 +413,16 @@ def confirm_and_apply_actions(
             tag_id_by_label[keep_tag] = new_tag["id"]
         return tag_id_by_label[keep_tag]
 
-    _, actions_by_series = _group_by_series(all_actions)
-    _, skips_by_series = _group_by_series(all_skips)
+    actions_by_series = _group_by_series(all_actions)
+    skips_by_series = _group_by_series(all_skips)
 
-    for sid in actions_by_series:
+    sorted_sids = sorted(
+        actions_by_series,
+        key=lambda sid: _series_size_gib(actions_by_series[sid]),
+        reverse=True,
+    )
+
+    for sid in sorted_sids:
         series_actions = actions_by_series[sid]
         title = series_actions[0]["series_title"]
 
@@ -567,18 +573,21 @@ def _print_summary(all_actions: list[dict]):
     print(f"  {BOLD}Space to free:     {total_gib} GiB{_R}")
 
 
-def _group_by_series(items: list[dict]) -> tuple[dict[int, str], dict[int, list[dict]]]:
-    """Group items by series_id, returning (ordered id->title map, id->items map)."""
+def _group_by_series(items: list[dict]) -> dict[int, list[dict]]:
+    """Group items by series_id, preserving encounter order."""
     from collections import defaultdict
 
-    seen: dict[int, str] = {}
     grouped: dict[int, list[dict]] = defaultdict(list)
     for item in items:
-        sid = item["series_id"]
-        if sid not in seen:
-            seen[sid] = item["series_title"]
-        grouped[sid].append(item)
-    return seen, grouped
+        grouped[item["series_id"]].append(item)
+    return grouped
+
+
+def _series_size_gib(actions: list[dict]) -> float:
+    """Total GiB across all delete_season_files actions for a series."""
+    return sum(
+        a.get("size_gib", 0.0) for a in actions if a["type"] == "delete_season_files"
+    )
 
 
 def print_report(all_actions: list[dict], all_skips: list[dict]):
@@ -592,11 +601,17 @@ def print_report(all_actions: list[dict], all_skips: list[dict]):
         print(f"{GREEN}No candidates found.{_R}")
         return
 
-    _, actions_by_series = _group_by_series(all_actions)
-    _, skips_by_series = _group_by_series(all_skips)
+    actions_by_series = _group_by_series(all_actions)
+    skips_by_series = _group_by_series(all_skips)
 
-    for sid, title in seen.items():
-        _print_series_detail(sid, title, actions_by_series[sid], skips_by_series[sid])
+    sorted_sids = sorted(
+        seen, key=lambda sid: _series_size_gib(actions_by_series[sid]), reverse=True
+    )
+
+    for sid in sorted_sids:
+        _print_series_detail(
+            sid, seen[sid], actions_by_series[sid], skips_by_series[sid]
+        )
 
     _print_summary(all_actions)
 
