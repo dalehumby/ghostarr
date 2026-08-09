@@ -32,7 +32,7 @@ All logic lives in `process_series()` in `ghostarr.py`.
 
 3. If a season aired within `cutoff_months` — stop the loop entirely. The series is still active.
 4. If a season has no downloaded episode files — skip this season and continue to the next.
-5. If a season has files — query Jellyfin (Playback Reporting plugin SQL) for the last watched datetime.
+5. If a season has files — query the Jellyfin watch history cache for the last watched datetime.
    - If never watched, or last watched more than `cutoff_months` ago: mark for deletion (unmonitor the season in Sonarr, then bulk-delete all episode files).
    - If watched within `cutoff_months`: stop the loop entirely. Someone is actively watching and may continue.
 
@@ -48,4 +48,4 @@ All logic lives in `process_series()` in `ghostarr.py`.
 - **Season 0 (specials) is treated as a normal season.** No special-casing.
 - **The `k` key in interactive mode** calls `SonarrClient.add_tag_to_series()` to PUT the keep tag onto the series immediately, so it is protected on future runs without any manual Sonarr UI step.
 - **`apply_actions()` is kept** alongside `confirm_and_apply_actions()` for potential scripted/non-interactive use in future.
-- **Jellyfin watch history** is queried via the Playback Reporting plugin's custom SQL endpoint (`/user_usage_stats/submit_custom_query`). The standard Jellyfin API does not expose per-episode watch timestamps in a usable form.
+- **Jellyfin watch history** is loaded upfront via the standard Jellyfin Items API. During init, `load_lookups()` fetches all played episodes across all users and builds an in-memory cache keyed by `(series_id, season_number)` with the latest `LastPlayedDate`. This replaced the Playback Reporting plugin's custom SQL endpoint which broke after a plugin update.
