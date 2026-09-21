@@ -426,6 +426,11 @@ def confirm_and_apply_actions(
         reverse=True,
     )
 
+    deleted_seasons = 0
+    deleted_files = 0
+    deleted_gib = 0.0
+    deleted_series = 0
+
     for sid in sorted_sids:
         series_actions = actions_by_series[sid]
         title = series_actions[0]["series_title"]
@@ -473,6 +478,9 @@ def confirm_and_apply_actions(
                     elif a["type"] == "delete_season_files":
                         ep_files = sonarr.get_episode_files(sid)
                         sonarr.delete_season_files(ep_files, season_number)
+                        deleted_seasons += 1
+                        deleted_files += a.get("file_count", 0)
+                        deleted_gib += a.get("size_gib", 0.0)
 
         if kept:
             continue
@@ -492,6 +500,9 @@ def confirm_and_apply_actions(
                     print(f'  {GREEN}[KEEP] Added "{keep_tag}" tag.{_R}')
                 elif answer == "y":
                     sonarr.delete_series(sid)
+                    deleted_series += 1
+
+    _print_results(deleted_seasons, deleted_series, deleted_files, deleted_gib)
 
 
 def _print_series_detail(
@@ -575,6 +586,19 @@ def _print_summary(all_actions: list[dict]):
     print(f"  Series to remove:  {len(series_deletes)}")
     print(f"  Files to delete:   {total_files}")
     print(f"  {BOLD}Space to free:     {total_gib} GiB{_R}")
+
+
+def _print_results(
+    deleted_seasons: int, deleted_series: int, deleted_files: int, deleted_gib: float
+):
+    """Print what was actually deleted after interactive confirmation."""
+    deleted_gib = round(deleted_gib, 1)
+    print(f"\n{DIM}{'─' * 50}{_R}")
+    print(f"{BOLD}Results{_R}")
+    print(f"  Seasons deleted:   {deleted_seasons}")
+    print(f"  Series removed:    {deleted_series}")
+    print(f"  Files deleted:     {deleted_files}")
+    print(f"  {BOLD}Space freed:       {deleted_gib} GiB{_R}")
 
 
 def _group_by_series(items: list[dict]) -> dict[int, list[dict]]:
