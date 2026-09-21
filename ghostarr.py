@@ -151,8 +151,12 @@ class JellyfinClient:
         self.base = url.rstrip("/")
         self.api_key = api_key
         self.session = requests.Session()
-        self.session.headers.update({"accept": "application/json"})
-        self.session.params = {"api_key": api_key}
+        self.session.headers.update(
+            {
+                "accept": "application/json",
+                "Authorization": f'MediaBrowser Token="{api_key}"',
+            }
+        )
         self._series_map: dict[str, str] = {}
         # (jellyfin_series_id, season_number) -> latest LastPlayedDate across all users
         self._watch_cache: dict[tuple[str, int], datetime] = {}
